@@ -1,4 +1,5 @@
 import os
+from collections import defaultdict
 from pathlib import Path
 
 import cv2
@@ -33,14 +34,14 @@ class AnythingVideo_TW():
         self.predictor = build_sam2_video_predictor(self.model_cfg, self.sam2_checkpoint, self.device)
 
         # 全局变量
-        self.coords = []
-        self.methods = []
+        self.object_prompts = defaultdict(lambda: {"points": [], "labels": []})
         self.frame = None
 
         self.option = False
         self.clicked_x = None
         self.clicked_y = None
         self.method = None
+        self.last_obj_id = None
 
         self.inference_state = None
         self.out_obj_ids = None
@@ -150,9 +151,27 @@ class AnythingVideo_TW():
         return str(output_dir),saved_count
     
     # 设置点击位置
-    def Set_Clicked(self, clicked, method):
+    def reset_object_prompts(self, obj_id=None):
+        """Clear cached prompt points for a specific object or all objects."""
+
+        if obj_id is None:
+            self.object_prompts.clear()
+            self.last_obj_id = None
+            return
+
+        self.object_prompts[obj_id] = {"points": [], "labels": []}
+
+    def Set_Clicked(self, clicked, method, obj_id=None):
+        if obj_id is None:
+            obj_id = self.last_obj_id or 1
+
         self.clicked_x, self.clicked_y = clicked
         self.method = method
+        self.last_obj_id = obj_id
+
+        prompts = self.object_prompts[obj_id]
+        prompts["points"].append([self.clicked_x, self.clicked_y])
+        prompts["labels"].append(method)
 
     # 显示点击点
     def Draw_Point(self, image, label):
@@ -161,20 +180,22 @@ class AnythingVideo_TW():
         elif label == 0:
             cv2.circle(image, (self.clicked_x, self.clicked_y), 5, (0, 0, 255), -1)  # 红色点
 
-    def add_new_points_or_box(self):
+    def add_new_points_or_box(self, obj_id=None):
         ann_frame_idx = 0  # 当前帧的索引
-        ann_obj_id = 1  # 默认目标 ID
+        if obj_id is None:
+            obj_id = self.last_obj_id or 1
 
-        self.coords.append([self.clicked_x, self.clicked_y])
-        self.methods.append(self.method)
+        prompts = self.object_prompts.get(obj_id)
+        if not prompts or not prompts["points"]:
+            return
 
-        points = np.array(self.coords)
-        labels = np.array(self.methods)
+        points = np.array(prompts["points"])
+        labels = np.array(prompts["labels"])
 
         _, self.out_obj_ids, self.out_mask_logits = self.predictor.add_new_points_or_box(
             inference_state=self.inference_state,
             frame_idx=ann_frame_idx,
-            obj_id=ann_obj_id,
+            obj_id=obj_id,
             points=points,
             labels=labels,
         )
@@ -346,18 +367,26 @@ class AnythingVideo_TW():
 
 
 
-    def Draw_Mask_at_frame(self, start_frame=0, return_frames=False, save_image_path=None ,save_path=None, text=None):
+    def Draw_Mask_at_frame(
+        self,
+        start_frame=0,
+        return_frames=False,
+        save_image_path=None,
+        save_path=None,
+        label_map=None,
+    ):
         """
         遍历所有帧并绘制轮廓
         Args:
             start_frame (int): 起始帧序号
             return_frames (bool): 是否返回处理后的帧列表
             save_path (str): 保存路径
-            text (str): XML文本说明
+            label_map (dict): 每个 obj_id 对应的标签名称
         Returns:
             tuple: (processed_frames, result, file_path, size) - processed_frames 在 return_frames=False 时为 None
         """
         # 1. 收集所有帧的分割结果
+        self.video_segments = {}
         for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor.propagate_in_video(self.inference_state):
             self.video_segments[out_frame_idx] = {
                 out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy()
@@ -382,9 +411,9 @@ class AnythingVideo_TW():
             frame_path = os.path.join(self.video_path, frame_names[frame_idx])
             frame = cv2.imread(frame_path)
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
+
             video_label = []
-            
+
             if frame_idx in self.video_segments:
                 for out_obj_id, out_mask in self.video_segments[frame_idx].items():
                     # 检查 Draw_Mask 的返回值
@@ -395,40 +424,57 @@ class AnythingVideo_TW():
                     else:
                         print(f"Warning: Draw_Mask returned unexpected format at frame {frame_idx}")
                         continue
-            
+
                     # 确保 frame 是有效的图像数组
                     if frame is not None and isinstance(frame, np.ndarray):
                         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                        
+
                         if return_frames:
                             processed_frames.append(frame)
-                            
+
                         if save_image_path:
                             # 保存前调整图片大小
                             frame_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                            
+
                             # 获取照片大小
-                            width, height = frame_pil.size
-                            ratio = 1300 / width
-                            width = 1300
-                            height *= ratio
-                            reduced_image = frame_pil.resize((int(width), int(height)))
-                            
-                            if height > 850:
-                                ratio = 850 / height
-                                height = 850
-                                width *= ratio
-                                reduced_image = frame_pil.resize((int(width), int(height)))
-                            
+                            orig_width, orig_height = frame_pil.size
+                            if orig_width == 0:
+                                continue
+
+                            ratio = 1300 / orig_width
+                            resized_width = 1300
+                            resized_height = int(orig_height * ratio)
+                            reduced_image = frame_pil.resize((int(resized_width), int(resized_height)))
+
+                            if resized_height > 850:
+                                ratio = 850 / resized_height
+                                resized_height = 850
+                                resized_width = int(resized_width * ratio)
+                                reduced_image = reduced_image.resize((int(resized_width), int(resized_height)))
+
                             # 保存调整后的图片
                             save_path_frame = f"{save_image_path}/{frame_idx}.jpg"
                             reduced_image.save(save_path_frame)
-                            
-                            result, file_path, size = xml_message(
-                                save_path, frame_idx, int(width), int(height),
-                                text, self.x, self.y, self.w, self.h
-                            )
-                            xml_messages.append([result, file_path, size])
+
+                            if save_path:
+                                label_name = None
+                                if label_map:
+                                    label_name = label_map.get(out_obj_id)
+                                if not label_name:
+                                    label_name = str(out_obj_id)
+
+                                result_label, file_path, size = xml_message(
+                                    save_path,
+                                    frame_idx,
+                                    int(resized_width),
+                                    int(resized_height),
+                                    label_name,
+                                    x,
+                                    y,
+                                    w,
+                                    h,
+                                )
+                                xml_messages.append([out_obj_id, result_label, file_path, size])
             else:
                 print(f"Warning: Invalid frame at index {frame_idx}")
 
@@ -446,10 +492,10 @@ if __name__ == '__main__':
     video_dir = AD.extract_frames_from_video(video_path, output_dir, fps=2)
     frame = AD.set_video(video_dir)
     AD.inference(video_dir)
-    AD.Set_Clicked([300, 483], 1)
-    AD.add_new_points_or_box()
+    AD.Set_Clicked([300, 483], 1, obj_id=1)
+    AD.add_new_points_or_box(obj_id=1)
     # AD.Draw_Mask_picture(frame_stride=1)
     # AD.Draw_Mask((AD.out_mask_logits[0] > 0.0).cpu().numpy(),frame) #暂时不用
     # AD.Draw_Mask_Video(output_video_path="segmented_output.mp4")
-    AD.Draw_Mask_at_frame() # 在指定帧上绘制轮廓（例如第10帧）
+    AD.Draw_Mask_at_frame(label_map={1: "object"}) # 在指定帧上绘制轮廓（例如第10帧）
     cv2.waitKey(0)

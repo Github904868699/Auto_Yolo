@@ -1,4 +1,5 @@
 import sys, os
+from collections import defaultdict
 from pathlib import Path
 from PyQt5 import QtGui, QtWidgets
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QPen
@@ -24,39 +25,55 @@ class VideoProcessingThread(QThread):
     finished = pyqtSignal()  # 完成信号
     frame_ready = pyqtSignal(object)  # 添加新信号用于传递处理后的帧
 
-    def __init__(self, avt, video_path, output_dir,clicked_x, clicked_y, method,text,save_path):
+    def __init__(self, video_path, output_dir, click_history, labels_by_obj, save_path, fps=2):
         super().__init__()
         self.AVT = AnythingVideo_TW()
         self.video_path = video_path
         self.output_dir = output_dir
-        self.clicked_x = clicked_x
-        self.clicked_y = clicked_y
-        self.method = method
-        self.text = text
+        self.click_history = click_history or {}
+        self.labels_by_obj = labels_by_obj or {}
         self.save_path = save_path
+        self.fps = fps
         self.xml_messages = []
         os.makedirs(self.output_dir, exist_ok=True)
 
     def run(self):
-        print(self.clicked_x, self.clicked_y, self.method)
         try:
-            # 创建输出目录和mask子目录
             os.makedirs(self.output_dir, exist_ok=True)
             mask_dir = os.path.join(self.output_dir, "mask")
             os.makedirs(mask_dir, exist_ok=True)
-            
+
+            prepared_objects = {
+                obj_id: events
+                for obj_id, events in self.click_history.items()
+                if events and self.labels_by_obj.get(obj_id)
+            }
+
+            if not prepared_objects:
+                raise ValueError("No annotated objects were provided for video propagation.")
+
             # 提取视频帧
-            self.AVT.extract_frames_from_video(self.video_path, self.output_dir,fps=2)
+            self.AVT.extract_frames_from_video(self.video_path, self.output_dir, fps=self.fps)
             self.AVT.set_video(self.output_dir)
             self.AVT.inference(self.output_dir)
-            self.AVT.Set_Clicked([self.clicked_x, self.clicked_y], self.method)
-            self.AVT.add_new_points_or_box()
-            
-            # 获取处理后的帧并发送信号
-            processed_frame, xml_messages = self.AVT.Draw_Mask_at_frame(save_image_path=mask_dir,save_path=self.save_path,text=self.text)  # 使用新的mask_dir路径
+
+            for obj_id, events in prepared_objects.items():
+                for event in events:
+                    coords = event.get("coords")
+                    method = event.get("method", 1)
+                    if coords is None:
+                        continue
+                    self.AVT.Set_Clicked([coords[0], coords[1]], method, obj_id=obj_id)
+                self.AVT.add_new_points_or_box(obj_id=obj_id)
+
+            processed_frames, xml_messages = self.AVT.Draw_Mask_at_frame(
+                save_image_path=mask_dir,
+                save_path=self.save_path,
+                labels_by_obj=self.labels_by_obj,
+            )
             self.xml_messages = xml_messages
-            self.frame_ready.emit(processed_frame)  # 发送处理后的帧
-            
+            self.frame_ready.emit(processed_frames)
+
         except Exception as e:
             print(f"处理出错: {str(e)}")
             import traceback
@@ -96,6 +113,22 @@ class MainFunc(QMainWindow):
         self.AVT = AnythingVideo_TW()
 
         self.timer_camera = QTimer()
+
+        start_button_index = self.ui.verticalLayout_2.indexOf(self.ui.pushButton_start_marking)
+        if start_button_index < 0:
+            start_button_index = self.ui.verticalLayout_2.count()
+
+        self.object_id_selector = QtWidgets.QComboBox(self)
+        self.object_id_selector.setObjectName("comboBox_object_ids")
+        self.object_id_selector.currentIndexChanged.connect(self.on_object_id_changed)
+        self.ui.verticalLayout_2.insertWidget(start_button_index, self.object_id_selector)
+
+        self.add_object_button = QtWidgets.QPushButton("新增目标", self)
+        self.add_object_button.setObjectName("button_add_object")
+        self.add_object_button.clicked.connect(self.on_add_object_clicked)
+        self.ui.verticalLayout_2.insertWidget(start_button_index + 1, self.add_object_button)
+
+        self._reset_video_object_state()
 
         self.annotation_format_actions = {
             "YOLO": self.ui.actionSaveTypeYOLO,
@@ -153,6 +186,75 @@ class MainFunc(QMainWindow):
     def clear_label_list(self):
         self.ui.listWidget.clear()
         self.label_boxes_by_row = []
+
+    def _reset_video_object_state(self):
+        self.object_clicks = defaultdict(list)
+        self.object_labels = {}
+        self.current_obj_id = 1
+        self.next_obj_id = 2
+        self._ensure_object_entry(self.current_obj_id)
+        self._refresh_object_selector()
+        self._update_video_start_button_state()
+
+    def _ensure_object_entry(self, obj_id):
+        if obj_id not in self.object_clicks:
+            self.object_clicks[obj_id] = []
+
+    def _refresh_object_selector(self):
+        if not hasattr(self, "object_id_selector"):
+            return
+
+        known_ids = sorted(set(self.object_clicks.keys()) | {self.current_obj_id})
+        if not known_ids:
+            known_ids = [1]
+
+        block = self.object_id_selector.blockSignals(True)
+        self.object_id_selector.clear()
+        for obj_id in known_ids:
+            label = self.object_labels.get(obj_id)
+            if label:
+                display_text = f"{label} (ID {obj_id})"
+            else:
+                display_text = f"Object {obj_id}"
+            self.object_id_selector.addItem(display_text, obj_id)
+
+        index = self.object_id_selector.findData(self.current_obj_id)
+        if index < 0 and known_ids:
+            self.current_obj_id = known_ids[0]
+            index = self.object_id_selector.findData(self.current_obj_id)
+        if index >= 0:
+            self.object_id_selector.setCurrentIndex(index)
+        self.object_id_selector.blockSignals(block)
+
+    def _update_video_start_button_state(self):
+        ready = any(
+            self.object_clicks.get(obj_id) and self.object_labels.get(obj_id)
+            for obj_id in set(self.object_clicks.keys()) | set(self.object_labels.keys())
+        )
+        self.ui.pushButton_start_marking.setEnabled(bool(ready))
+
+    def _register_video_click(self, obj_id, x, y, method):
+        self._ensure_object_entry(obj_id)
+        self.object_clicks[obj_id].append({
+            "coords": (int(x), int(y)),
+            "method": int(method),
+        })
+        self._update_video_start_button_state()
+
+    def on_object_id_changed(self, index):
+        data = self.object_id_selector.itemData(index)
+        if data is None:
+            return
+        self.current_obj_id = int(data)
+        self._ensure_object_entry(self.current_obj_id)
+
+    def on_add_object_clicked(self):
+        new_id = self.next_obj_id
+        self.next_obj_id += 1
+        self.current_obj_id = new_id
+        self._ensure_object_entry(new_id)
+        self._refresh_object_selector()
+        self._update_video_start_button_state()
 
     @staticmethod
     def _normalized_box(x1, y1, x2, y2):
@@ -371,6 +473,9 @@ class MainFunc(QMainWindow):
                 self.AT.Create_Mask()
                 image = self.AT.Draw_Mask(self.AT.mask, image)
 
+                if self.video_path and self.output_dir:
+                    self._register_video_click(self.current_obj_id, x, y, self.method)
+
                 h,w,channels=image.shape
                 bytes_per_line = channels * w
                 q_image = QImage(image.data, w, h, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
@@ -469,25 +574,44 @@ class MainFunc(QMainWindow):
         self.Show_Exists()
 
     def video_on_dialog_confirmed(self, text):
-        self.text = text
-        print(self.text)
+        if not text:
+            return
+
         if not self.save_path:
             upWindowsh("请选择保存路径")
-        elif text and self.clicked_event:
-            self.ui.listWidget.addItem(text)
-            result, file_path, size = xml_message(self.save_path, self.image_name, self.img_width, self.img_height,
-                                                    text, self.AT.x, self.AT.y, self.AT.w, self.AT.h)
+            return
+
+        if self.clicked_event:
+            obj_id = self.current_obj_id
+            self.object_labels[obj_id] = text
+            self._refresh_object_selector()
+
+            display_text = f"{text} (ID {obj_id})"
+            self.ui.listWidget.addItem(display_text)
+
+            result, file_path, size = xml_message(
+                self.save_path,
+                self.image_name,
+                self.img_width,
+                self.img_height,
+                text,
+                self.AT.x,
+                self.AT.y,
+                self.AT.w,
+                self.AT.h,
+            )
+            result["obj_id"] = obj_id
             self.labels.append(result)
             box = self._normalized_box(self.AT.x, self.AT.y, self.AT.w + self.AT.x, self.AT.h + self.AT.y)
             self.clicked_save.append(box)
             self.label_boxes_by_row.append(box)
             self.save_annotation_files(self.image_path, self.image_name, size, self.labels)
-            # 启用"开始检测打标"按钮
-            self.ui.pushButton_start_marking.setEnabled(True)
+
         self.clicked_event = False
         self.paint_event = False
 
         self.Show_Exists()
+        self._update_video_start_button_state()
         
 
     # 显示已存在框
@@ -772,6 +896,7 @@ class MainFunc(QMainWindow):
         if self.video_path and self.output_dir:
             self.Change_Enable(method="MakeTag",state=False)
             self.Change_Enable(method="ShowVideo",state=False)
+            self._reset_video_object_state()
             if self.cap:
                 self.cap.release()
                 self.timer_camera.stop()
@@ -811,32 +936,43 @@ class MainFunc(QMainWindow):
 
     def on_video_processing_complete(self):
         self.worker_thread.deleteLater()
-        self.xml_messages = self.worker_thread.xml_messages
-        # print(self.xml_messages)
-        
-        # 遍历输出目录中的图片
+        self.xml_messages = self.worker_thread.xml_messages or []
+
         for img_file in os.listdir(self.output_dir):
-            if img_file.endswith(('.jpg', '.jpeg', '.png')):  # 检查图片文件扩展名
-                # 获取不带扩展名的文件名
-                img_name = os.path.splitext(img_file)[0]
-                img_file  = os.path.join(self.output_dir,img_file)
+            if not img_file.lower().endswith(('.jpg', '.jpeg', '.png')):
+                continue
 
-                # 在xml_messages中查找对应的消息
-                for msg in self.xml_messages:
-                    self.labels = []
-                    if len(msg) > 1:  # 确保msg有足够的元素
-                        xml_path = msg[1]  # 获取索引值为1的路径
-                        xml_filename = os.path.splitext(os.path.basename(xml_path))[0]
+            img_name = os.path.splitext(img_file)[0]
+            img_full_path = os.path.join(self.output_dir, img_file)
 
-                        # 如果文件名匹配，则复制XML文件到save_path
-                        if xml_filename == img_name and self.save_path:
-                            result = msg[0]
-                            file_path = msg[1]
-                            size = msg[2]
-                            self.labels.append(result)
-                            self.save_annotation_files(img_file, img_name, size, self.labels)
+            matched_labels = None
+            matched_size = None
+
+            for msg in self.xml_messages:
+                frame_labels = msg.get("labels", [])
+                frame_size = msg.get("size")
+                if not frame_labels or not frame_size:
+                    continue
+
+                xml_path = msg.get("file_path")
+                frame_idx = msg.get("frame_idx")
+                if xml_path:
+                    xml_filename = os.path.splitext(os.path.basename(xml_path))[0]
+                else:
+                    xml_filename = str(frame_idx)
+
+                if xml_filename == img_name:
+                    matched_labels = [dict(label) for label in frame_labels]
+                    matched_size = frame_size
+                    break
+
+            if matched_labels and matched_size and self.save_path:
+                self.labels = matched_labels
+                self.save_annotation_files(img_full_path, img_name, matched_size, matched_labels)
+
         self.ui.listWidget.addItem("检测打标完成！")
         print("检测打标完成！")
+        self._update_video_start_button_state()
 
     def on_save_type_triggered(self, fmt, checked):
         if checked:
@@ -879,10 +1015,30 @@ class MainFunc(QMainWindow):
         self.ui.pushButton_start_marking.setEnabled(False)
         if self.video_path and self.output_dir:
             # 创建并启动工作线程
-            self.worker_thread = VideoProcessingThread(self.AVT, self.video_path, self.output_dir,self.clicked_x, self.clicked_y, self.method,self.text,self.save_path)
+            click_history = {
+                obj_id: [
+                    {
+                        "coords": (event["coords"][0], event["coords"][1]),
+                        "method": event.get("method", 1),
+                    }
+                    for event in events
+                    if event.get("coords") is not None
+                ]
+                for obj_id, events in self.object_clicks.items()
+                if events
+            }
+            labels_by_obj = {obj_id: label for obj_id, label in self.object_labels.items() if label}
+
+            self.worker_thread = VideoProcessingThread(
+                self.video_path,
+                self.output_dir,
+                click_history,
+                labels_by_obj,
+                self.save_path,
+            )
             self.worker_thread.finished.connect(self.on_video_processing_complete)
             self.worker_thread.start()
-            
+
 
         else:
             upWindowsh("请先选择视频和保存路径")

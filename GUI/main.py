@@ -24,7 +24,7 @@ class VideoProcessingThread(QThread):
     finished = pyqtSignal()  # 完成信号
     frame_ready = pyqtSignal(object)  # 添加新信号用于传递处理后的帧
 
-    def __init__(self, avt, video_path, output_dir,clicked_x, clicked_y, method,text,save_path):
+    def __init__(self, avt, video_path, output_dir, clicked_x, clicked_y, method, obj_id, text, save_path):
         super().__init__()
         self.AVT = AnythingVideo_TW()
         self.video_path = video_path
@@ -32,6 +32,7 @@ class VideoProcessingThread(QThread):
         self.clicked_x = clicked_x
         self.clicked_y = clicked_y
         self.method = method
+        self.obj_id = obj_id
         self.text = text
         self.save_path = save_path
         self.xml_messages = []
@@ -49,8 +50,8 @@ class VideoProcessingThread(QThread):
             self.AVT.extract_frames_from_video(self.video_path, self.output_dir,fps=2)
             self.AVT.set_video(self.output_dir)
             self.AVT.inference(self.output_dir)
-            self.AVT.Set_Clicked([self.clicked_x, self.clicked_y], self.method)
-            self.AVT.add_new_points_or_box()
+            self.AVT.Set_Clicked([self.clicked_x, self.clicked_y], self.method, self.obj_id)
+            self.AVT.add_new_points_or_box(obj_id=self.obj_id)
             
             # 获取处理后的帧并发送信号
             processed_frame, xml_messages = self.AVT.Draw_Mask_at_frame(save_image_path=mask_dir,save_path=self.save_path,text=self.text)  # 使用新的mask_dir路径
@@ -91,6 +92,9 @@ class MainFunc(QMainWindow):
         self.save = True
         self.cap = None
         self.video_path = None
+
+        self.current_obj_id = 1
+        self.next_obj_id = 1
 
         self.AT = Anything_TW()
         self.AVT = AnythingVideo_TW()
@@ -484,6 +488,8 @@ class MainFunc(QMainWindow):
             self.save_annotation_files(self.image_path, self.image_name, size, self.labels)
             # 启用"开始检测打标"按钮
             self.ui.pushButton_start_marking.setEnabled(True)
+            self.current_obj_id = self.next_obj_id
+            self.next_obj_id += 1
         self.clicked_event = False
         self.paint_event = False
 
@@ -768,6 +774,8 @@ class MainFunc(QMainWindow):
 
         output_dir = QtWidgets.QFileDialog.getExistingDirectory(self, "选择图片保存文件夹")
         self.output_dir = output_dir
+        self.current_obj_id = 1
+        self.next_obj_id = 1
         self.clear_label_list()
         if self.video_path and self.output_dir:
             self.Change_Enable(method="MakeTag",state=False)
@@ -879,7 +887,17 @@ class MainFunc(QMainWindow):
         self.ui.pushButton_start_marking.setEnabled(False)
         if self.video_path and self.output_dir:
             # 创建并启动工作线程
-            self.worker_thread = VideoProcessingThread(self.AVT, self.video_path, self.output_dir,self.clicked_x, self.clicked_y, self.method,self.text,self.save_path)
+            self.worker_thread = VideoProcessingThread(
+                self.AVT,
+                self.video_path,
+                self.output_dir,
+                self.clicked_x,
+                self.clicked_y,
+                self.method,
+                self.current_obj_id,
+                self.text,
+                self.save_path,
+            )
             self.worker_thread.finished.connect(self.on_video_processing_complete)
             self.worker_thread.start()
             

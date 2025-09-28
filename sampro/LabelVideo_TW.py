@@ -33,14 +33,16 @@ class AnythingVideo_TW():
         self.predictor = build_sam2_video_predictor(self.model_cfg, self.sam2_checkpoint, self.device)
 
         # 全局变量
-        self.coords = []
-        self.methods = []
         self.frame = None
 
         self.option = False
         self.clicked_x = None
         self.clicked_y = None
         self.method = None
+        self.current_obj_id = None
+
+        self.prompts_by_obj = {}
+        self.mask_logits_by_obj = {}
 
         self.inference_state = None
         self.out_obj_ids = None
@@ -53,8 +55,23 @@ class AnythingVideo_TW():
         self.w = 0
         self.h = 0
 
+    def _clear_interaction_state(self):
+        """Reset cached prompts and logits for a new interaction session."""
+        self.prompts_by_obj = {}
+        self.mask_logits_by_obj = {}
+        self.clicked_x = None
+        self.clicked_y = None
+        self.method = None
+        self.current_obj_id = None
+        self.option = False
+        self.out_obj_ids = None
+        self.out_mask_logits = None
+        self.inference_state = None
+
     def set_video(self, video_dir):
         self.video_path = video_dir
+        self._clear_interaction_state()
+        self.video_segments = {}
         frame_names = [
             p for p in os.listdir(video_dir)
             if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG"]
@@ -150,9 +167,14 @@ class AnythingVideo_TW():
         return str(output_dir),saved_count
     
     # 设置点击位置
-    def Set_Clicked(self, clicked, method):
+    def Set_Clicked(self, clicked, method, obj_id):
         self.clicked_x, self.clicked_y = clicked
         self.method = method
+        self.current_obj_id = obj_id
+
+        prompts = self.prompts_by_obj.setdefault(obj_id, {"points": [], "labels": []})
+        prompts["points"].append([self.clicked_x, self.clicked_y])
+        prompts["labels"].append(self.method)
 
     # 显示点击点
     def Draw_Point(self, image, label):
@@ -161,15 +183,19 @@ class AnythingVideo_TW():
         elif label == 0:
             cv2.circle(image, (self.clicked_x, self.clicked_y), 5, (0, 0, 255), -1)  # 红色点
 
-    def add_new_points_or_box(self):
+    def add_new_points_or_box(self, obj_id=None):
         ann_frame_idx = 0  # 当前帧的索引
-        ann_obj_id = 1  # 默认目标 ID
+        ann_obj_id = obj_id if obj_id is not None else self.current_obj_id
 
-        self.coords.append([self.clicked_x, self.clicked_y])
-        self.methods.append(self.method)
+        if ann_obj_id is None:
+            raise ValueError("Object ID must be provided either via Set_Clicked or as an argument.")
 
-        points = np.array(self.coords)
-        labels = np.array(self.methods)
+        prompts = self.prompts_by_obj.get(ann_obj_id)
+        if not prompts or not prompts["points"]:
+            return None
+
+        points = np.array(prompts["points"], dtype=np.float32)
+        labels = np.array(prompts["labels"], dtype=np.int32)
 
         _, self.out_obj_ids, self.out_mask_logits = self.predictor.add_new_points_or_box(
             inference_state=self.inference_state,
@@ -178,7 +204,10 @@ class AnythingVideo_TW():
             points=points,
             labels=labels,
         )
+        for idx, out_obj_id in enumerate(self.out_obj_ids):
+            self.mask_logits_by_obj[out_obj_id] = self.out_mask_logits[idx]
         self.option = True
+        return self.out_obj_ids, self.out_mask_logits
         
 
     # def Draw_Mask(self, mask, frame,obj_id=None):
@@ -438,7 +467,7 @@ class AnythingVideo_TW():
 
 
 if __name__ == '__main__':
-    
+
     AD = AnythingVideo_TW()
     # 提取视频帧
     video_path = r"sampro\notebooks\videos\bedroom.mp4"
@@ -446,8 +475,8 @@ if __name__ == '__main__':
     video_dir = AD.extract_frames_from_video(video_path, output_dir, fps=2)
     frame = AD.set_video(video_dir)
     AD.inference(video_dir)
-    AD.Set_Clicked([300, 483], 1)
-    AD.add_new_points_or_box()
+    AD.Set_Clicked([300, 483], 1, 1)
+    AD.add_new_points_or_box(obj_id=1)
     # AD.Draw_Mask_picture(frame_stride=1)
     # AD.Draw_Mask((AD.out_mask_logits[0] > 0.0).cpu().numpy(),frame) #暂时不用
     # AD.Draw_Mask_Video(output_video_path="segmented_output.mp4")

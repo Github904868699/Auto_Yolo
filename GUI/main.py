@@ -34,7 +34,7 @@ class VideoProcessingThread(QThread):
         self.method = method
         self.text = text
         self.save_path = save_path
-        self.xml_messages = []
+        self.xml_messages = {"frames": [], "objects": {}}
         os.makedirs(self.output_dir, exist_ok=True)
 
     def run(self):
@@ -53,7 +53,11 @@ class VideoProcessingThread(QThread):
             self.AVT.add_new_points_or_box()
             
             # 获取处理后的帧并发送信号
-            processed_frame, xml_messages = self.AVT.Draw_Mask_at_frame(save_image_path=mask_dir,save_path=self.save_path,text=self.text)  # 使用新的mask_dir路径
+            processed_frame, xml_messages = self.AVT.Draw_Mask_at_frame(
+                save_image_path=mask_dir,
+                save_path=self.save_path,
+                text=self.text,
+            )  # 使用新的mask_dir路径
             self.xml_messages = xml_messages
             self.frame_ready.emit(processed_frame)  # 发送处理后的帧
             
@@ -811,30 +815,28 @@ class MainFunc(QMainWindow):
 
     def on_video_processing_complete(self):
         self.worker_thread.deleteLater()
-        self.xml_messages = self.worker_thread.xml_messages
-        # print(self.xml_messages)
-        
+        self.xml_messages = self.worker_thread.xml_messages or {"frames": [], "objects": {}}
+        frame_annotations = self.xml_messages.get("frames", [])
+
         # 遍历输出目录中的图片
         for img_file in os.listdir(self.output_dir):
             if img_file.endswith(('.jpg', '.jpeg', '.png')):  # 检查图片文件扩展名
-                # 获取不带扩展名的文件名
                 img_name = os.path.splitext(img_file)[0]
-                img_file  = os.path.join(self.output_dir,img_file)
+                img_file_path = os.path.join(self.output_dir, img_file)
 
-                # 在xml_messages中查找对应的消息
-                for msg in self.xml_messages:
-                    self.labels = []
-                    if len(msg) > 1:  # 确保msg有足够的元素
-                        xml_path = msg[1]  # 获取索引值为1的路径
-                        xml_filename = os.path.splitext(os.path.basename(xml_path))[0]
+                for msg in frame_annotations:
+                    xml_path = msg.get("file_path")
+                    if not xml_path:
+                        continue
 
-                        # 如果文件名匹配，则复制XML文件到save_path
-                        if xml_filename == img_name and self.save_path:
-                            result = msg[0]
-                            file_path = msg[1]
-                            size = msg[2]
-                            self.labels.append(result)
-                            self.save_annotation_files(img_file, img_name, size, self.labels)
+                    xml_filename = os.path.splitext(os.path.basename(xml_path))[0]
+
+                    if xml_filename == img_name and self.save_path:
+                        size = msg.get("size", [0, 0, 3])
+                        labels = msg.get("labels", [])
+                        if not labels:
+                            continue
+                        self.save_annotation_files(img_file_path, img_name, size, labels)
         self.ui.listWidget.addItem("检测打标完成！")
         print("检测打标完成！")
 

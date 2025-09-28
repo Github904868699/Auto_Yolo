@@ -53,18 +53,26 @@ class Anything_TW():
     #设置图像
     def Set_Image(self, image):
         self.predictor.set_image(image)
-                
+
         #初始图像
         self.image = image.copy()
         #画了点的图像
-        self.image_dot = image.copy()  
+        self.image_dot = image.copy()
         #画了mask的图像
         self.image_mask = image.copy()
         #用来保存mask的图像
         self.image_save = image.copy()
-        
-        
-    #设置点击 
+
+        # 重置交互状态，确保新目标以空白点击开始
+        self.coords = []
+        self.methods = []
+        self.option = False
+        self.logits = None
+        self.scores = None
+        self.mask = None
+
+
+    #设置点击
     def Set_Clicked(self, clicked, method):
         self.clicked_x, self.clicked_y = clicked
         self.method = method
@@ -73,31 +81,40 @@ class Anything_TW():
     def Key_Event(self, key):
         if key == 83:
             self.image_save = self.Draw_Mask(self.mask, self.image_save)
-            
+
             self.image_dot = self.image.copy()
             self.image_mask = self.image_save.copy()
-            
+
             self.coords = []
             self.methods = []
-            
-            
+            self.option = False
+            self.logits = None
+            self.scores = None
+
+
         elif key == 81:
             self.image_dot = self.image.copy()
             self.image_mask = self.image_save.copy()
-            
+
             self.coords = []
             self.methods = []
-            
+            self.option = False
+            self.logits = None
+            self.scores = None
+
         #键盘的backspace键
         elif key == 16777219:
 
             self.image_dot = self.image.copy()
             self.image_mask = self.image.copy()
             self.image_save = self.image.copy()
-                        
+
             self.coords = []
             self.methods = []
-            
+            self.option = False
+            self.logits = None
+            self.scores = None
+
         return self.image_mask
             
             

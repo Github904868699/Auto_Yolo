@@ -26,7 +26,7 @@ class VideoProcessingThread(QThread):
 
     def __init__(self, avt, video_path, output_dir,clicked_x, clicked_y, method,text,save_path):
         super().__init__()
-        self.AVT = AnythingVideo_TW()
+        self.AVT = avt or AnythingVideo_TW()
         self.video_path = video_path
         self.output_dir = output_dir
         self.clicked_x = clicked_x

@@ -1,4 +1,5 @@
 import os
+from collections import defaultdict
 from pathlib import Path
 
 import cv2
@@ -46,12 +47,6 @@ class AnythingVideo_TW():
         self.out_obj_ids = None
         self.out_mask_logits = None
         self.video_segments = {}
-
-        # 矩形框
-        self.x = 0
-        self.y = 0
-        self.w = 0
-        self.h = 0
 
     def set_video(self, video_dir):
         self.video_path = video_dir
@@ -220,54 +215,39 @@ class AnythingVideo_TW():
     #     return img
     
     def Draw_Mask(self, mask, frame, obj_id=None):
-        # 转换 mask 为 NumPy 数组
+        """Overlay ``mask`` on ``frame`` and return bounding-box data.
+
+        Returns:
+            tuple: (frame_with_mask, obj_id, x, y, w, h) when a contour is
+            detected. If no contour is found, ``x``..``h`` will be ``None``.
+        """
+
         mask = mask.cpu().numpy() if isinstance(mask, torch.Tensor) else mask
         h, w = mask.shape[-2:]
         mask = mask.reshape(h, w, 1)
-        
-        # 创建一个彩色的 mask
+
         color_mask = np.zeros_like(frame, dtype=np.uint8)
-        color_mask[:, :, 0] = 0    # 蓝色分量
         color_mask[:, :, 1] = 255  # 绿色分量
-        color_mask[:, :, 2] = 0    # 红色分量
 
-        # 将 mask 应用到彩色 mask 上
-        mask = (mask > 0).astype(np.uint8)  # 二值化
-        color_mask = cv2.bitwise_and(color_mask, color_mask, mask=mask.squeeze())
+        mask = (mask > 0).astype(np.uint8)
+        frame_mask = mask.squeeze()
+        color_mask = cv2.bitwise_and(color_mask, color_mask, mask=frame_mask)
 
-        # 叠加到原始帧上 (半透明)
-        alpha = 0.5  # 透明度
+        alpha = 0.5
         frame_with_mask = cv2.addWeighted(frame, 1 - alpha, color_mask, alpha, 0)
 
-        # 显示轮廓
-        contours, _ = cv2.findContours(mask.squeeze(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(frame_with_mask, contours, -1, (0, 255, 0), 2)  # 绿色轮廓
+        contours, _ = cv2.findContours(frame_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        # 初始化最大面积和对应的最大轮廓
+        if not contours:
+            return frame_with_mask, obj_id, None, None, None, None
 
-        img = frame_with_mask.copy()
+        max_contour = max(contours, key=cv2.contourArea)
+        x, y, bbox_w, bbox_h = cv2.boundingRect(max_contour)
 
-        max_area = 0
-        max_contour = None
+        cv2.rectangle(frame_with_mask, (x, y), (x + bbox_w, y + bbox_h), (0, 255, 0), 2)
+        cv2.drawContours(frame_with_mask, contours, -1, (0, 255, 0), 2)
 
-        # 遍历每个轮廓
-        for contour in contours:
-        # 计算轮廓的面积
-            area = cv2.contourArea(contour)
-            
-            # 如果当前面积大于最大面积，则更新最大面积和对应的最大轮廓
-            if area > max_area:
-                max_area = area
-                max_contour = contour
-                
-        # 使用矩形框绘制最大轮廓
-        self.x, self.y, self.w, self.h = cv2.boundingRect(max_contour)
-        cv2.rectangle(img, (self.x, self.y), (self.x + self.w, self.y + self.h), (0, 255, 0), 2)
-        # 在原图上绘制边缘线
-        cv2.drawContours(img, contours, -1, (0, 255, 0), 2)
-        self.image_mask = img
-        print(self.x, self.y, self.w, self.h)
-        return img,self.x, self.y, self.w, self.h
+        return frame_with_mask, obj_id, x, y, bbox_w, bbox_h
 
     def Draw_Mask_Video(self, output_video_path="segmented_output.mp4"):
         # 收集所有帧的分割结果
@@ -355,7 +335,10 @@ class AnythingVideo_TW():
             save_path (str): 保存路径
             text (str): XML文本说明
         Returns:
-            tuple: (processed_frames, result, file_path, size) - processed_frames 在 return_frames=False 时为 None
+            tuple: (processed_frames, annotations)
+                processed_frames: 在 ``return_frames`` 为 ``True`` 时包含处理后的帧列表。
+                annotations: 字典，包含 ``frames``（逐帧的标注信息）和 ``objects``（以 ``out_obj_id``
+                为键的框序列）。
         """
         # 1. 收集所有帧的分割结果
         for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor.propagate_in_video(self.inference_state):
@@ -372,68 +355,144 @@ class AnythingVideo_TW():
         frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
 
         processed_frames = [] if return_frames else None
-        result = None
-        file_path = None
-        size = None
+
+        frame_annotations = []
+        boxes_by_object = defaultdict(list)
 
         # 遍历所有帧
-        xml_messages = []
         for frame_idx in range(start_frame, len(frame_names)):
             frame_path = os.path.join(self.video_path, frame_names[frame_idx])
             frame = cv2.imread(frame_path)
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-            video_label = []
-            
+
+            frame_with_annotations = frame.copy()
+            frame_boxes = []
+
             if frame_idx in self.video_segments:
                 for out_obj_id, out_mask in self.video_segments[frame_idx].items():
-                    # 检查 Draw_Mask 的返回值
-                    result = self.Draw_Mask(out_mask, frame.copy(), out_obj_id)
-                    if isinstance(result, tuple) and len(result) == 5:
-                        frame, x, y, w, h = result
-                        video_label.append([x, y, w, h])
-                    else:
+                    drawn = self.Draw_Mask(out_mask, frame_with_annotations, out_obj_id)
+                    if not isinstance(drawn, tuple) or len(drawn) != 6:
                         print(f"Warning: Draw_Mask returned unexpected format at frame {frame_idx}")
                         continue
-            
-                    # 确保 frame 是有效的图像数组
-                    if frame is not None and isinstance(frame, np.ndarray):
-                        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                        
-                        if return_frames:
-                            processed_frames.append(frame)
-                            
-                        if save_image_path:
-                            # 保存前调整图片大小
-                            frame_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                            
-                            # 获取照片大小
-                            width, height = frame_pil.size
-                            ratio = 1300 / width
-                            width = 1300
-                            height *= ratio
-                            reduced_image = frame_pil.resize((int(width), int(height)))
-                            
-                            if height > 850:
-                                ratio = 850 / height
-                                height = 850
-                                width *= ratio
-                                reduced_image = frame_pil.resize((int(width), int(height)))
-                            
-                            # 保存调整后的图片
-                            save_path_frame = f"{save_image_path}/{frame_idx}.jpg"
-                            reduced_image.save(save_path_frame)
-                            
-                            result, file_path, size = xml_message(
-                                save_path, frame_idx, int(width), int(height),
-                                text, self.x, self.y, self.w, self.h
-                            )
-                            xml_messages.append([result, file_path, size])
-            else:
-                print(f"Warning: Invalid frame at index {frame_idx}")
 
-        # 始终返回元组，而不是在 return_frames=False 时返回 None
-        return processed_frames, xml_messages
+                    frame_with_annotations, obj_id, x, y, w, h = drawn
+
+                    if None in (x, y, w, h):
+                        continue
+
+                    bbox_entry = {
+                        "frame_idx": frame_idx,
+                        "bbox": (int(x), int(y), int(w), int(h)),
+                        "image_path": None,
+                    }
+                    boxes_by_object[obj_id].append(bbox_entry)
+                    frame_boxes.append({
+                        "obj_id": obj_id,
+                        "bbox": (int(x), int(y), int(w), int(h)),
+                        "bbox_entry": bbox_entry,
+                    })
+
+            if not frame_boxes:
+                continue
+
+            frame_bgr = cv2.cvtColor(frame_with_annotations, cv2.COLOR_RGB2BGR)
+
+            if return_frames:
+                processed_frames.append(frame_bgr.copy())
+
+            save_path_frame = None
+            image_width = frame_bgr.shape[1]
+            image_height = frame_bgr.shape[0]
+            labels = []
+            annotation_size = [image_width, image_height, 3]
+
+            if save_image_path:
+                frame_pil = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
+
+                width, height = frame_pil.size
+                if width:
+                    ratio = 1300 / width
+                    width = int(1300)
+                    height = int(height * ratio)
+                else:
+                    width, height = frame_bgr.shape[1], frame_bgr.shape[0]
+
+                reduced_image = frame_pil.resize((max(width, 1), max(height, 1)))
+
+                if height > 850:
+                    ratio = 850 / height
+                    height = int(850)
+                    width = int(width * ratio)
+                    reduced_image = reduced_image.resize((max(width, 1), max(height, 1)))
+
+                save_path_frame = f"{save_image_path}/{frame_idx}.jpg"
+                reduced_image.save(save_path_frame)
+
+                image_width, image_height = reduced_image.size
+                annotation_size = [image_width, image_height, 3]
+
+            file_path = None
+            size = None
+
+            for box in frame_boxes:
+                obj_id = box["obj_id"]
+                x, y, w, h = box["bbox"]
+                label_name = text
+                if label_name:
+                    label_name = f"{label_name}_{obj_id}"
+                else:
+                    label_name = str(obj_id)
+
+                if save_path:
+                    result, file_path, size = xml_message(
+                        save_path,
+                        frame_idx,
+                        image_width,
+                        image_height,
+                        label_name,
+                        x,
+                        y,
+                        w,
+                        h,
+                    )
+                else:
+                    x_min = int(round(x))
+                    y_min = int(round(y))
+                    w_int = int(round(w))
+                    h_int = int(round(h))
+                    result = {
+                        "name": label_name,
+                        "pose": "Unspecified",
+                        "truncated": 0,
+                        "difficult": 0,
+                        "bndbox": [
+                            x_min,
+                            y_min,
+                            x_min + w_int,
+                            y_min + h_int,
+                        ],
+                    }
+                    size = [image_width, image_height, 3]
+
+                labels.append(result)
+
+                if save_path_frame:
+                    box["bbox_entry"]["image_path"] = save_path_frame
+
+            if not labels:
+                continue
+
+            frame_annotations.append({
+                "frame_idx": frame_idx,
+                "file_path": file_path,
+                "size": size if size else annotation_size,
+                "labels": labels,
+            })
+
+        return processed_frames, {
+            "frames": frame_annotations,
+            "objects": {obj_id: entries for obj_id, entries in boxes_by_object.items()},
+        }
 
 
 

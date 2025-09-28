@@ -260,7 +260,11 @@ class MainFunc(QMainWindow):
                 xml_path.unlink()
             if txt_path.exists():
                 txt_path.unlink()
-            
+
+    def _restore_label4_interaction(self):
+        self.ui.label_4.mousePressEvent = self.mouse_press_event
+        self.ui.label_4.setCursor(Qt.ArrowCursor)
+
     def get_dir(self):
         self.clear_label_list()
         if self.cap:
@@ -515,13 +519,16 @@ class MainFunc(QMainWindow):
     def video_on_dialog_confirmed(self, text):
         if not self.save_path:
             upWindowsh("请选择保存路径")
+            self._restore_label4_interaction()
             return
 
         if not (text and self.clicked_event):
+            self._restore_label4_interaction()
             return
 
         if not self.pending_video_prompts:
             upWindowsh("请先在视频上选择点")
+            self._restore_label4_interaction()
             return
 
         self.ui.listWidget.addItem(text)
@@ -565,7 +572,8 @@ class MainFunc(QMainWindow):
         self.paint_event = False
 
         self.Show_Exists()
-        
+        self._restore_label4_interaction()
+
 
     # 显示已存在框
     def Show_Exists(self):

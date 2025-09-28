@@ -51,8 +51,17 @@ def list_label(label_path):
     list_box = []
     for obj in objects:
         name = obj.find('name').text
-        box = [int(obj.find('bndbox/xmin').text), int(obj.find('bndbox/ymin').text),
-                int(obj.find('bndbox/xmin').text)+int(obj.find('bndbox/xmax').text), int(obj.find('bndbox/ymin').text)+int(obj.find('bndbox/ymax').text)]
+        xmin = int(obj.find('bndbox/xmin').text)
+        ymin = int(obj.find('bndbox/ymin').text)
+        xmax = int(obj.find('bndbox/xmax').text)
+        ymax = int(obj.find('bndbox/ymax').text)
+
+        if xmax <= xmin and xmax > 0:
+            xmax = xmin + xmax
+        if ymax <= ymin and ymax > 0:
+            ymax = ymin + ymax
+
+        box = [xmin, ymin, xmax, ymax]
         list_labels.append(name)
         list_box.append(box)
     return list_labels,list_box
@@ -71,9 +80,20 @@ def get_labels(label_path):
             'pose': obj.find('pose').text,
             'truncated': int(obj.find('truncated').text),
             'difficult': int(obj.find('difficult').text),
-            'bndbox': [int(obj.find('bndbox/xmin').text), int(obj.find('bndbox/ymin').text),
-                       int(obj.find('bndbox/xmax').text), int(obj.find('bndbox/ymax').text)]
+            'bndbox': [
+                int(obj.find('bndbox/xmin').text),
+                int(obj.find('bndbox/ymin').text),
+                int(obj.find('bndbox/xmax').text),
+                int(obj.find('bndbox/ymax').text)
+            ]
         }
+        x_min, y_min, x_max, y_max = item['bndbox']
+        if x_max <= x_min and x_max > 0:
+            x_max = x_min + x_max
+        if y_max <= y_min and y_max > 0:
+            y_max = y_min + y_max
+        item['bndbox'] = [x_min, y_min, x_max, y_max]
+
         get_list_label.append(item)
 
     return get_list_label

@@ -424,14 +424,17 @@ class SimpleLabelerWindow(QtWidgets.QMainWindow):
                 rects = []
                 for raw in labels:
                     xmin, ymin, xmax, ymax = raw["bndbox"]
-                    width = xmax - xmin if xmax > xmin else xmax
-                    height = ymax - ymin if ymax > ymin else ymax
+                    if xmax <= xmin and xmax > 0:
+                        xmax = xmin + xmax
+                    if ymax <= ymin and ymax > 0:
+                        ymax = ymin + ymax
+                    raw["bndbox"] = [xmin, ymin, xmax, ymax]
+
                     x1_disp = int(round(xmin * self.display_scale))
                     y1_disp = int(round(ymin * self.display_scale))
-                    x2_disp = int(round((xmin + width) * self.display_scale))
-                    y2_disp = int(round((ymin + height) * self.display_scale))
+                    x2_disp = int(round(xmax * self.display_scale))
+                    y2_disp = int(round(ymax * self.display_scale))
                     rects.append((x1_disp, y1_disp, x2_disp, y2_disp))
-                    raw["bndbox"] = [xmin, ymin, width, height]
                 break
 
         self.current_labels = labels

@@ -85,21 +85,32 @@ def _write_yolo_annotation(base_path: Path, size, labels):
             continue
 
         x_min, y_min, width_or_xmax, height_or_ymax = label["bndbox"][:4]
-        width = width_or_xmax
-        height = height_or_ymax
+
+        x_min = float(x_min)
+        y_min = float(y_min)
+        x_max = float(width_or_xmax)
+        y_max = float(height_or_ymax)
 
         # Historical annotations stored width/height instead of xmax/ymax.
         # Guard against negative or zero dimensions by falling back to difference.
-        if width <= 0 and width_or_xmax > x_min:
-            width = width_or_xmax - x_min
-        if height <= 0 and height_or_ymax > y_min:
-            height = height_or_ymax - y_min
+        if x_max <= x_min and width_or_xmax > 0:
+            x_max = x_min + float(width_or_xmax)
+        if y_max <= y_min and height_or_ymax > 0:
+            y_max = y_min + float(height_or_ymax)
+
+        x_min = min(max(x_min, 0.0), image_w)
+        y_min = min(max(y_min, 0.0), image_h)
+        x_max = min(max(x_max, 0.0), image_w)
+        y_max = min(max(y_max, 0.0), image_h)
+
+        width = x_max - x_min
+        height = y_max - y_min
 
         if width <= 0 or height <= 0:
             continue
 
-        x_center = (x_min + width / 2) / image_w
-        y_center = (y_min + height / 2) / image_h
+        x_center = (x_min + x_max) / 2 / image_w
+        y_center = (y_min + y_max) / 2 / image_h
         norm_width = width / image_w
         norm_height = height / image_h
 
@@ -155,21 +166,31 @@ def load_yolo_labels(txt_path: Path, image_w: int, image_h: int):
 
             class_name = class_list[class_id] if 0 <= class_id < len(class_list) else str(class_id)
 
-            x_min = max(int(round(x_center - box_width / 2)), 0)
-            y_min = max(int(round(y_center - box_height / 2)), 0)
-            width = max(int(round(box_width)), 0)
-            height = max(int(round(box_height)), 0)
+            x_min_f = x_center - box_width / 2
+            y_min_f = y_center - box_height / 2
+            x_max_f = x_center + box_width / 2
+            y_max_f = y_center + box_height / 2
+
+            x_min = max(int(round(x_min_f)), 0)
+            y_min = max(int(round(y_min_f)), 0)
+            x_max = min(int(round(x_max_f)), image_w)
+            y_max = min(int(round(y_max_f)), image_h)
+
+            if x_max <= x_min:
+                x_max = min(x_min + max(int(round(box_width)), 1), image_w)
+            if y_max <= y_min:
+                y_max = min(y_min + max(int(round(box_height)), 1), image_h)
 
             label = {
                 "name": class_name,
                 "pose": "Unspecified",
                 "truncated": 0,
                 "difficult": 0,
-                "bndbox": [x_min, y_min, width, height],
+                "bndbox": [x_min, y_min, x_max, y_max],
             }
 
             labels.append(label)
-            boxes.append([x_min, y_min, x_min + width, y_min + height])
+            boxes.append([x_min, y_min, x_max, y_max])
             names.append(class_name)
 
     return labels, boxes, names
@@ -212,14 +233,21 @@ def xml(image_path, save_path, size, labels):
         difficult.text = str(dic['difficult'])
 
         bndbox = ET.SubElement(object, 'bndbox')
+        x_min, y_min, x_max_val, y_max_val = dic['bndbox'][:4]
+
+        if x_max_val <= x_min and x_max_val > 0:
+            x_max_val = x_min + x_max_val
+        if y_max_val <= y_min and y_max_val > 0:
+            y_max_val = y_min + y_max_val
+
         xmin = ET.SubElement(bndbox, 'xmin')
-        xmin.text = str(dic['bndbox'][0])
+        xmin.text = str(int(round(x_min)))
         ymin = ET.SubElement(bndbox, 'ymin')
-        ymin.text = str(dic['bndbox'][1])
+        ymin.text = str(int(round(y_min)))
         xmax = ET.SubElement(bndbox, 'xmax')
-        xmax.text = str(dic['bndbox'][2])
+        xmax.text = str(int(round(x_max_val)))
         ymax = ET.SubElement(bndbox, 'ymax')
-        ymax.text = str(dic['bndbox'][3])
+        ymax.text = str(int(round(y_max_val)))
 
     indent(root)  # 格式化xml
     tree = ET.ElementTree(root)
@@ -230,12 +258,20 @@ def xml(image_path, save_path, size, labels):
 def xml_message(save_path,image_name,img_width,img_height,text,x,y,w,h):
     file_path = os.path.join(save_path, f"{image_name}.xml")
     size = [img_width, img_height, 3]
+    x_min = int(round(x))
+    y_min = int(round(y))
+    width = int(round(w))
+    height = int(round(h))
+
+    x_max = x_min + max(width, 0)
+    y_max = y_min + max(height, 0)
+
     result = {
         'name': text,
         'pose': 'Unspecified',
         'truncated': 0,
         'difficult': 0,
-        'bndbox': [x, y, w, h]
+        'bndbox': [x_min, y_min, x_max, y_max]
     }
     return result,file_path,size
 

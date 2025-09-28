@@ -24,39 +24,55 @@ class VideoProcessingThread(QThread):
     finished = pyqtSignal()  # 完成信号
     frame_ready = pyqtSignal(object)  # 添加新信号用于传递处理后的帧
 
-    def __init__(self, avt, video_path, output_dir,clicked_x, clicked_y, method,text,save_path):
+    def __init__(self, avt, video_path, output_dir, prompts, label_map, save_path):
         super().__init__()
-        self.AVT = AnythingVideo_TW()
+        self.AVT = avt
         self.video_path = video_path
         self.output_dir = output_dir
-        self.clicked_x = clicked_x
-        self.clicked_y = clicked_y
-        self.method = method
-        self.text = text
+        self.prompts = prompts or []
+        self.label_map = label_map or {}
         self.save_path = save_path
         self.xml_messages = []
         os.makedirs(self.output_dir, exist_ok=True)
 
     def run(self):
-        print(self.clicked_x, self.clicked_y, self.method)
         try:
             # 创建输出目录和mask子目录
             os.makedirs(self.output_dir, exist_ok=True)
             mask_dir = os.path.join(self.output_dir, "mask")
             os.makedirs(mask_dir, exist_ok=True)
-            
+
             # 提取视频帧
             self.AVT.extract_frames_from_video(self.video_path, self.output_dir,fps=2)
             self.AVT.set_video(self.output_dir)
             self.AVT.inference(self.output_dir)
-            self.AVT.Set_Clicked([self.clicked_x, self.clicked_y], self.method)
-            self.AVT.add_new_points_or_box()
-            
+            self.AVT.reset_object_prompts()
+
+            prompts_by_object = {}
+            for prompt in self.prompts:
+                obj_id = prompt.get("obj_id")
+                if obj_id is None:
+                    continue
+                prompts_by_object.setdefault(obj_id, []).append(prompt)
+
+            for obj_id, obj_prompts in prompts_by_object.items():
+                for prompt in obj_prompts:
+                    coords = prompt.get("coords")
+                    label = prompt.get("label")
+                    if coords is None or label is None:
+                        continue
+                    self.AVT.Set_Clicked(list(coords), label, obj_id=obj_id)
+                self.AVT.add_new_points_or_box(obj_id=obj_id)
+
             # 获取处理后的帧并发送信号
-            processed_frame, xml_messages = self.AVT.Draw_Mask_at_frame(save_image_path=mask_dir,save_path=self.save_path,text=self.text)  # 使用新的mask_dir路径
+            processed_frame, xml_messages = self.AVT.Draw_Mask_at_frame(
+                save_image_path=mask_dir,
+                save_path=self.save_path,
+                label_map=self.label_map,
+            )  # 使用新的mask_dir路径
             self.xml_messages = xml_messages
             self.frame_ready.emit(processed_frame)  # 发送处理后的帧
-            
+
         except Exception as e:
             print(f"处理出错: {str(e)}")
             import traceback
@@ -91,6 +107,14 @@ class MainFunc(QMainWindow):
         self.save = True
         self.cap = None
         self.video_path = None
+
+        # 视频标注相关数据
+        self.is_video_mode = False
+        self.video_prompt_queue = {}
+        self.video_object_labels = {}
+        self.pending_video_prompts = []
+        self.pending_video_obj_id = None
+        self.next_video_obj_id = 1
 
         self.AT = Anything_TW()
         self.AVT = AnythingVideo_TW()
@@ -215,6 +239,9 @@ class MainFunc(QMainWindow):
         self.clicked_event = False
         self.paint_event = False
         self.save = True
+        if self.is_video_mode:
+            self.pending_video_prompts = []
+            self.pending_video_obj_id = None
         self.clear_label_list()
         self.list_labels = []
         self.clicked_save = []
@@ -239,6 +266,12 @@ class MainFunc(QMainWindow):
         if self.cap:
             self.timer_camera.stop()
             self.clear_label_list()  # 清空listWidget
+        self.is_video_mode = False
+        self.video_prompt_queue = {}
+        self.video_object_labels = {}
+        self.pending_video_prompts = []
+        self.pending_video_obj_id = None
+        self.ui.pushButton_start_marking.setEnabled(False)
         self.directory = QtWidgets.QFileDialog.getExistingDirectory()
         if self.directory:
             self.image_files = list_images_in_directory(self.directory)
@@ -366,6 +399,14 @@ class MainFunc(QMainWindow):
                 if event.button() == Qt.RightButton:
                     self.clicked_x, self.clicked_y, self.method = x, y, 0
 
+                if self.is_video_mode and self.method in (0, 1):
+                    if self.pending_video_obj_id is None:
+                        self.pending_video_obj_id = self.next_video_obj_id
+                    self.pending_video_prompts.append({
+                        "coords": (self.clicked_x, self.clicked_y),
+                        "label": self.method,
+                    })
+
                 image = self.image.copy()
                 self.AT.Set_Clicked([x, y], self.method)
                 self.AT.Create_Mask()
@@ -405,6 +446,9 @@ class MainFunc(QMainWindow):
                         self.clicked_event = False
                         self.paint_event = False
                         self.save = True
+                        if self.is_video_mode:
+                            self.pending_video_prompts = []
+                            self.pending_video_obj_id = None
                         self.Show_Exists()
                         self.ui.label_4.mousePressEvent = self.mouse_press_event
                         self.ui.label_4.setCursor(Qt.ArrowCursor)
@@ -469,21 +513,54 @@ class MainFunc(QMainWindow):
         self.Show_Exists()
 
     def video_on_dialog_confirmed(self, text):
-        self.text = text
-        print(self.text)
         if not self.save_path:
             upWindowsh("请选择保存路径")
-        elif text and self.clicked_event:
-            self.ui.listWidget.addItem(text)
-            result, file_path, size = xml_message(self.save_path, self.image_name, self.img_width, self.img_height,
-                                                    text, self.AT.x, self.AT.y, self.AT.w, self.AT.h)
-            self.labels.append(result)
-            box = self._normalized_box(self.AT.x, self.AT.y, self.AT.w + self.AT.x, self.AT.h + self.AT.y)
-            self.clicked_save.append(box)
-            self.label_boxes_by_row.append(box)
-            self.save_annotation_files(self.image_path, self.image_name, size, self.labels)
-            # 启用"开始检测打标"按钮
-            self.ui.pushButton_start_marking.setEnabled(True)
+            return
+
+        if not (text and self.clicked_event):
+            return
+
+        if not self.pending_video_prompts:
+            upWindowsh("请先在视频上选择点")
+            return
+
+        self.ui.listWidget.addItem(text)
+        result, file_path, size = xml_message(
+            self.save_path,
+            self.image_name,
+            self.img_width,
+            self.img_height,
+            text,
+            self.AT.x,
+            self.AT.y,
+            self.AT.w,
+            self.AT.h,
+        )
+        self.labels.append(result)
+        box = self._normalized_box(self.AT.x, self.AT.y, self.AT.w + self.AT.x, self.AT.h + self.AT.y)
+        self.clicked_save.append(box)
+        self.label_boxes_by_row.append(box)
+        self.save_annotation_files(self.image_path, self.image_name, size, self.labels)
+
+        obj_id = self.pending_video_obj_id if self.pending_video_obj_id is not None else self.next_video_obj_id
+        prompts = []
+        for prompt in self.pending_video_prompts:
+            prompts.append({
+                "coords": prompt["coords"],
+                "label": prompt["label"],
+                "obj_id": obj_id,
+                "name": text,
+            })
+
+        self.video_prompt_queue[obj_id] = prompts
+        self.video_object_labels[obj_id] = text
+        self.next_video_obj_id = max(self.next_video_obj_id, obj_id + 1)
+        self.pending_video_prompts = []
+        self.pending_video_obj_id = None
+
+        # 启用"开始检测打标"按钮
+        self.ui.pushButton_start_marking.setEnabled(bool(self.video_prompt_queue))
+
         self.clicked_event = False
         self.paint_event = False
 
@@ -770,6 +847,13 @@ class MainFunc(QMainWindow):
         self.output_dir = output_dir
         self.clear_label_list()
         if self.video_path and self.output_dir:
+            self.is_video_mode = True
+            self.video_prompt_queue = {}
+            self.video_object_labels = {}
+            self.pending_video_prompts = []
+            self.pending_video_obj_id = None
+            self.next_video_obj_id = 1
+            self.ui.pushButton_start_marking.setEnabled(False)
             self.Change_Enable(method="MakeTag",state=False)
             self.Change_Enable(method="ShowVideo",state=False)
             if self.cap:
@@ -806,6 +890,8 @@ class MainFunc(QMainWindow):
             # 鼠标点击触发
             self.ui.label_4.mousePressEvent = self.mouse_press_event
         else:
+            self.is_video_mode = False
+            self.ui.pushButton_start_marking.setEnabled(False)
             upWindowsh("请先选择视频和保存路径")
 
 
@@ -813,7 +899,20 @@ class MainFunc(QMainWindow):
         self.worker_thread.deleteLater()
         self.xml_messages = self.worker_thread.xml_messages
         # print(self.xml_messages)
-        
+
+        frame_annotations = {}
+        for msg in self.xml_messages:
+            if len(msg) == 4:
+                _, result, file_path, size = msg
+            elif len(msg) == 3:
+                result, file_path, size = msg
+            else:
+                continue
+
+            xml_filename = os.path.splitext(os.path.basename(file_path))[0]
+            entry = frame_annotations.setdefault(xml_filename, {"labels": [], "size": size})
+            entry["labels"].append(result)
+
         # 遍历输出目录中的图片
         for img_file in os.listdir(self.output_dir):
             if img_file.endswith(('.jpg', '.jpeg', '.png')):  # 检查图片文件扩展名
@@ -821,22 +920,16 @@ class MainFunc(QMainWindow):
                 img_name = os.path.splitext(img_file)[0]
                 img_file  = os.path.join(self.output_dir,img_file)
 
-                # 在xml_messages中查找对应的消息
-                for msg in self.xml_messages:
-                    self.labels = []
-                    if len(msg) > 1:  # 确保msg有足够的元素
-                        xml_path = msg[1]  # 获取索引值为1的路径
-                        xml_filename = os.path.splitext(os.path.basename(xml_path))[0]
+                annotation = frame_annotations.get(img_name)
+                if not annotation or not self.save_path:
+                    continue
 
-                        # 如果文件名匹配，则复制XML文件到save_path
-                        if xml_filename == img_name and self.save_path:
-                            result = msg[0]
-                            file_path = msg[1]
-                            size = msg[2]
-                            self.labels.append(result)
-                            self.save_annotation_files(img_file, img_name, size, self.labels)
+                self.labels = list(annotation["labels"])
+                size = annotation["size"]
+                self.save_annotation_files(img_file, img_name, size, self.labels)
         self.ui.listWidget.addItem("检测打标完成！")
         print("检测打标完成！")
+        self.ui.pushButton_start_marking.setEnabled(bool(self.video_prompt_queue))
 
     def on_save_type_triggered(self, fmt, checked):
         if checked:
@@ -878,11 +971,42 @@ class MainFunc(QMainWindow):
         # 禁用开始检测打标按钮
         self.ui.pushButton_start_marking.setEnabled(False)
         if self.video_path and self.output_dir:
+            if not self.video_prompt_queue:
+                upWindowsh("请先添加目标点")
+                self.ui.pushButton_start_marking.setEnabled(False)
+                return
+
+            prompts = []
+            for obj_id in sorted(self.video_prompt_queue.keys()):
+                for prompt in self.video_prompt_queue[obj_id]:
+                    coords = prompt.get("coords")
+                    label = prompt.get("label")
+                    if coords is None or label is None:
+                        continue
+                    prompts.append({
+                        "coords": coords,
+                        "label": label,
+                        "obj_id": obj_id,
+                    })
+
+            label_map = {obj_id: name for obj_id, name in self.video_object_labels.items()}
+
+            if not prompts:
+                upWindowsh("未找到有效的提示点")
+                self.ui.pushButton_start_marking.setEnabled(bool(self.video_prompt_queue))
+                return
+
             # 创建并启动工作线程
-            self.worker_thread = VideoProcessingThread(self.AVT, self.video_path, self.output_dir,self.clicked_x, self.clicked_y, self.method,self.text,self.save_path)
+            self.worker_thread = VideoProcessingThread(
+                self.AVT,
+                self.video_path,
+                self.output_dir,
+                prompts,
+                label_map,
+                self.save_path,
+            )
             self.worker_thread.finished.connect(self.on_video_processing_complete)
             self.worker_thread.start()
-            
 
         else:
             upWindowsh("请先选择视频和保存路径")

@@ -14,7 +14,10 @@ from util.xmlfile import *
 from GUI.UI_Main import Ui_MainWindow
 from GUI.message import LabelInputDialog
 
-sys.path.append("smapro")
+project_root = Path(__file__).resolve().parent.parent
+sampro_path = str(project_root / "sampro")
+if sampro_path not in sys.path:
+    sys.path.append(sampro_path)
 from sampro.LabelQuick_TW import Anything_TW
 from sampro.LabelVideo_TW import AnythingVideo_TW
 
